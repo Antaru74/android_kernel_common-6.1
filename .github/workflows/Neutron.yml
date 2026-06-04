@@ -120,7 +120,7 @@ jobs:
 
           mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
 
-          make "${BUILD_OPTIONS[@]}" spearhead_defconfig
+          make "${BUILD_OPTIONS[@]}" spearhead2_defconfig
           make "${BUILD_OPTIONS[@]}" Image
 
           if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
