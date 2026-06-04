@@ -17,19 +17,43 @@ jobs:
           fetch-depth: 1
           submodules: 'recursive'
 
-      - name: Download and apply kernel patches
+      - name: Download and apply kernel patches (skip if fails)
         run: |
           echo "Downloading patches..."
           curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
           curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
 
-          echo "Applying abi_bypass.patch ..."
-          patch -p1 -N < abi_bypass.patch
+          # Function to apply patch safely
+          apply_patch() {
+            local patch_file=$1
+            local patch_level=$2
+            echo "Trying to apply $patch_file with -p$patch_level..."
+            if patch -p$patch_level -N --dry-run < $patch_file > /dev/null 2>&1; then
+              patch -p$patch_level -N < $patch_file
+              echo "✓ $patch_file applied successfully with -p$patch_level"
+              return 0
+            else
+              echo "✗ $patch_file cannot be applied with -p$patch_level"
+              return 1
+            fi
+          }
 
-          echo "Applying sysvipc_fix.patch ..."
-          patch -p1 -N < sysvipc_fix.patch
+          # Try abi_bypass.patch with -p1 (standard)
+          if ! apply_patch abi_bypass.patch 1; then
+            # Try with -p0 just in case
+            if ! apply_patch abi_bypass.patch 0; then
+              echo "WARNING: abi_bypass.patch cannot be applied. Skipping..."
+            fi
+          fi
 
-          echo "All patches applied successfully."
+          # Try sysvipc_fix.patch with -p1
+          if ! apply_patch sysvipc_fix.patch 1; then
+            if ! apply_patch sysvipc_fix.patch 0; then
+              echo "WARNING: sysvipc_fix.patch cannot be applied. Skipping..."
+            fi
+          fi
+
+          echo "Patch processing completed."
 
       - name: Install build dependencies
         run: |
@@ -52,7 +76,6 @@ jobs:
           curl -L -o neutron-clang.tar.zst https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/03062026/neutron-clang-03062026.tar.zst
           tar -I zstd -xf neutron-clang.tar.zst
           rm neutron-clang.tar.zst
-          # Neutron biasanya mengekstrak ke folder seperti neutron-clang-03062026
           CLANG_DIR=$(ls -d neutron-clang-* | head -n1)
           echo "PATH=$HOME/toolchains/$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
           echo "CC=$HOME/toolchains/$CLANG_DIR/bin/clang" >> $GITHUB_ENV
@@ -64,7 +87,6 @@ jobs:
           echo "KERNEL_ROOT=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "KBUILD_BUILD_USER=@ravindu644" >> $GITHUB_ENV
-          # Neutron Clang menyimpan library di $CLANG_DIR/lib
           echo "LD_LIBRARY_PATH=${HOME}/toolchains/neutron-clang-*/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
       - name: Build kernel
