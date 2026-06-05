@@ -23,10 +23,10 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
           echo "KernelSU-Next installed successfully"
 
-      # =============== 2. Setup Susfs ===============
+      # =============== 2. Setup Susfs (using dev branch) ===============
       - name: Clone susfs4ksu repository
         run: |
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1 susfs
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1-dev --depth=1 susfs
 
       - name: Copy Susfs kernel files
         run: |
@@ -34,15 +34,25 @@ jobs:
           cp susfs/kernel_patches/include/linux/susfs.h include/linux/
           cp susfs/kernel_patches/include/linux/susfs_def.h include/linux/
 
-      - name: Apply Susfs integration patch to KernelSU-Next
-        run: |
-          cd KernelSU-Next
-          patch -p1 < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
-          cd ..
-
       - name: Apply main Susfs patch to kernel
         run: |
-          patch -p1 < susfs/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          patch -p1 -F 3 < susfs/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+
+      - name: Apply Susfs integration patch to KernelSU-Next (with fallback)
+        run: |
+          cd KernelSU-Next
+          # Coba dengan -p1 dan fuzz 3
+          if patch -p1 -N --batch --no-backup-if-mismatch -F 3 < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch; then
+            echo "Integration patch applied with -p1"
+          else
+            echo "Patch -p1 failed, trying -p0..."
+            if patch -p0 -N --batch --no-backup-if-mismatch -F 3 < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch; then
+              echo "Integration patch applied with -p0"
+            else
+              echo "WARNING: Integration patch failed. Susfs may not fully work."
+            fi
+          fi
+          cd ..
 
       # =============== 3. Apply other patches (ABI bypass, sysvipc) ===============
       - name: Download and apply other patches
@@ -129,6 +139,7 @@ jobs:
           mkdir -p "${KERNEL_ROOT}/out"
 
           # Gunakan defconfig khusus (pastikan file spearhead2ksu_defconfig ada di arch/arm64/configs/)
+          # Pastikan CONFIG_KSU=y dan CONFIG_KSU_SUSFS=y sudah ada di defconfig
           make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
           make "${BUILD_OPTIONS[@]}" olddefconfig
           make "${BUILD_OPTIONS[@]}" Image
