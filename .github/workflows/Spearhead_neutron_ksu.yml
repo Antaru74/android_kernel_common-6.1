@@ -17,28 +17,34 @@ jobs:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # =============== 1. Clone & Apply KernelSU + Susfs patches ===============
-      - name: Clone KernelSU repository
+      # =============== 1. Download & Apply KernelSU patch (for 6.1) ===============
+      - name: Download KernelSU patch
         run: |
-          git clone https://github.com/tiann/KernelSU.git --depth=1
-          # Patch KernelSU untuk kernel 6.1 (ada di kernel_patches/KernelSU-6.1.patch)
-          echo "KERNELSU_PATCH=$(pwd)/KernelSU/kernel_patches/KernelSU-6.1.patch" >> $GITHUB_ENV
+          curl -L -o kernelsu_6.1.patch https://raw.githubusercontent.com/tiann/KernelSU/main/kernel_patches/KernelSU-6.1.patch
+          echo "KERNELSU_PATCH=$(pwd)/kernelsu_6.1.patch" >> $GITHUB_ENV
 
-      - name: Clone susfs4ksu repository
-        run: |
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1 ksu
-          echo "SUSFS_MAIN_PATCH=$(pwd)/ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch" >> $GITHUB_ENV
-          echo "SUSFS_INTEGRATION_PATCH=$(pwd)/ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" >> $GITHUB_ENV
-
-      - name: Apply KernelSU patch (for 6.1)
+      - name: Apply KernelSU patch
         run: |
           if patch -p1 -N --dry-run < $KERNELSU_PATCH > /dev/null 2>&1; then
             patch -p1 -N < $KERNELSU_PATCH
             echo "✓ KernelSU patch applied"
           else
-            echo "✗ KernelSU patch failed"
-            exit 1
+            echo "✗ KernelSU patch failed, trying -p0..."
+            if patch -p0 -N --dry-run < $KERNELSU_PATCH > /dev/null 2>&1; then
+              patch -p0 -N < $KERNELSU_PATCH
+              echo "✓ KernelSU patch applied with -p0"
+            else
+              echo "KernelSU patch cannot be applied. Aborting."
+              exit 1
+            fi
           fi
+
+      # =============== 2. Clone susfs4ksu & apply patches ===============
+      - name: Clone susfs4ksu repository
+        run: |
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1 ksu
+          echo "SUSFS_MAIN_PATCH=$(pwd)/ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch" >> $GITHUB_ENV
+          echo "SUSFS_INTEGRATION_PATCH=$(pwd)/ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" >> $GITHUB_ENV
 
       - name: Apply Susfs main patch
         run: |
@@ -46,8 +52,14 @@ jobs:
             patch -p1 -N < $SUSFS_MAIN_PATCH
             echo "✓ Susfs main patch applied"
           else
-            echo "✗ Susfs main patch failed"
-            exit 1
+            echo "✗ Susfs main patch failed, trying -p0..."
+            if patch -p0 -N --dry-run < $SUSFS_MAIN_PATCH > /dev/null 2>&1; then
+              patch -p0 -N < $SUSFS_MAIN_PATCH
+              echo "✓ Susfs main patch applied with -p0"
+            else
+              echo "Susfs main patch cannot be applied. Aborting."
+              exit 1
+            fi
           fi
 
       - name: Apply Susfs-KernelSU integration patch
@@ -56,11 +68,17 @@ jobs:
             patch -p1 -N < $SUSFS_INTEGRATION_PATCH
             echo "✓ Integration patch applied"
           else
-            echo "✗ Integration patch failed"
-            exit 1
+            echo "✗ Integration patch failed, trying -p0..."
+            if patch -p0 -N --dry-run < $SUSFS_INTEGRATION_PATCH > /dev/null 2>&1; then
+              patch -p0 -N < $SUSFS_INTEGRATION_PATCH
+              echo "✓ Integration patch applied with -p0"
+            else
+              echo "Integration patch cannot be applied. Aborting."
+              exit 1
+            fi
           fi
 
-      # =============== 2. Other patches (ABI bypass, sysvipc fix) ===============
+      # =============== 3. Other patches (ABI bypass, sysvipc fix) ===============
       - name: Download and apply kernel patches (skip if fails)
         run: |
           echo "Downloading patches..."
@@ -95,7 +113,7 @@ jobs:
 
           echo "Patch processing completed."
 
-      # =============== 3. Install dependencies ===============
+      # =============== 4. Install dependencies ===============
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -110,7 +128,7 @@ jobs:
           wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
             sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb || true
 
-      # =============== 4. Setup Neutron Clang ===============
+      # =============== 5. Setup Neutron Clang ===============
       - name: Setup Neutron Clang toolchain
         run: |
           mkdir -p $HOME/toolchains
@@ -124,7 +142,7 @@ jobs:
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      # =============== 5. Environment variables ===============
+      # =============== 6. Environment variables ===============
       - name: Set environment variables
         run: |
           echo "KERNEL_ROOT=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
@@ -132,7 +150,7 @@ jobs:
           echo "KBUILD_BUILD_USER=@ravindu644" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=${HOME}/toolchains/neutron-clang-*/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
-      # =============== 6. Build kernel with custom defconfig ===============
+      # =============== 7. Build kernel with custom defconfig ===============
       - name: Build kernel
         id: build
         run: |
@@ -164,7 +182,7 @@ jobs:
 
           mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
 
-          # Gunakan defconfig khusus KernelSU + Susfs
+          # Gunakan defconfig khusus KernelSU + Susfs (pastikan file ada)
           make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
           make "${BUILD_OPTIONS[@]}" Image
 
@@ -175,7 +193,7 @@ jobs:
             exit 1
           fi
 
-      # =============== 7. Collect artifacts ===============
+      # =============== 8. Collect artifacts ===============
       - name: Collect artifacts (kernel image only)
         if: steps.build.outputs.exit_code == 0
         run: |
