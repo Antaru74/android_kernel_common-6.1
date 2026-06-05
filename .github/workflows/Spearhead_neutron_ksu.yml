@@ -11,109 +11,66 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository (depth=1)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # =============== 1. Download & Apply KernelSU patch (for 6.1) ===============
-      - name: Download KernelSU patch
+      - name: Download and apply KernelSU patch (6.1)
         run: |
           curl -L -o kernelsu_6.1.patch https://raw.githubusercontent.com/tiann/KernelSU/main/kernel_patches/KernelSU-6.1.patch
-          echo "KERNELSU_PATCH=$(pwd)/kernelsu_6.1.patch" >> $GITHUB_ENV
-
-      - name: Apply KernelSU patch
-        run: |
-          if patch -p1 -N --dry-run < $KERNELSU_PATCH > /dev/null 2>&1; then
-            patch -p1 -N < $KERNELSU_PATCH
-            echo "✓ KernelSU patch applied"
+          if patch -p1 -N --dry-run < kernelsu_6.1.patch 2>/dev/null; then
+            patch -p1 -N < kernelsu_6.1.patch
+            echo "KernelSU patch applied with -p1"
+          elif patch -p0 -N --dry-run < kernelsu_6.1.patch 2>/dev/null; then
+            patch -p0 -N < kernelsu_6.1.patch
+            echo "KernelSU patch applied with -p0"
           else
-            echo "✗ KernelSU patch failed, trying -p0..."
-            if patch -p0 -N --dry-run < $KERNELSU_PATCH > /dev/null 2>&1; then
-              patch -p0 -N < $KERNELSU_PATCH
-              echo "✓ KernelSU patch applied with -p0"
-            else
-              echo "KernelSU patch cannot be applied. Aborting."
-              exit 1
-            fi
+            echo "Failed to apply KernelSU patch"
+            exit 1
           fi
 
-      # =============== 2. Clone susfs4ksu & apply patches ===============
-      - name: Clone susfs4ksu repository
+      - name: Clone susfs4ksu
         run: |
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1 ksu
-          echo "SUSFS_MAIN_PATCH=$(pwd)/ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch" >> $GITHUB_ENV
-          echo "SUSFS_INTEGRATION_PATCH=$(pwd)/ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" >> $GITHUB_ENV
 
       - name: Apply Susfs main patch
         run: |
-          if patch -p1 -N --dry-run < $SUSFS_MAIN_PATCH > /dev/null 2>&1; then
-            patch -p1 -N < $SUSFS_MAIN_PATCH
-            echo "✓ Susfs main patch applied"
+          if patch -p1 -N --dry-run < ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch 2>/dev/null; then
+            patch -p1 -N < ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+          elif patch -p0 -N --dry-run < ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch 2>/dev/null; then
+            patch -p0 -N < ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
           else
-            echo "✗ Susfs main patch failed, trying -p0..."
-            if patch -p0 -N --dry-run < $SUSFS_MAIN_PATCH > /dev/null 2>&1; then
-              patch -p0 -N < $SUSFS_MAIN_PATCH
-              echo "✓ Susfs main patch applied with -p0"
-            else
-              echo "Susfs main patch cannot be applied. Aborting."
-              exit 1
-            fi
+            echo "Failed to apply Susfs main patch"
+            exit 1
           fi
 
       - name: Apply Susfs-KernelSU integration patch
         run: |
-          if patch -p1 -N --dry-run < $SUSFS_INTEGRATION_PATCH > /dev/null 2>&1; then
-            patch -p1 -N < $SUSFS_INTEGRATION_PATCH
-            echo "✓ Integration patch applied"
+          if patch -p1 -N --dry-run < ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch 2>/dev/null; then
+            patch -p1 -N < ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+          elif patch -p0 -N --dry-run < ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch 2>/dev/null; then
+            patch -p0 -N < ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
           else
-            echo "✗ Integration patch failed, trying -p0..."
-            if patch -p0 -N --dry-run < $SUSFS_INTEGRATION_PATCH > /dev/null 2>&1; then
-              patch -p0 -N < $SUSFS_INTEGRATION_PATCH
-              echo "✓ Integration patch applied with -p0"
-            else
-              echo "Integration patch cannot be applied. Aborting."
-              exit 1
-            fi
+            echo "Failed to apply integration patch"
+            exit 1
           fi
 
-      # =============== 3. Other patches (ABI bypass, sysvipc fix) ===============
-      - name: Download and apply kernel patches (skip if fails)
+      - name: Download and apply other patches
         run: |
-          echo "Downloading patches..."
           curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
           curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
-
-          apply_patch() {
-            local patch_file=$1
-            local patch_level=$2
-            echo "Trying to apply $patch_file with -p$patch_level..."
-            if patch -p$patch_level -N --dry-run < $patch_file > /dev/null 2>&1; then
-              patch -p$patch_level -N < $patch_file
-              echo "✓ $patch_file applied successfully with -p$patch_level"
-              return 0
+          for p in abi_bypass.patch sysvipc_fix.patch; do
+            if patch -p1 -N --dry-run < $p 2>/dev/null; then
+              patch -p1 -N < $p
+            elif patch -p0 -N --dry-run < $p 2>/dev/null; then
+              patch -p0 -N < $p
             else
-              echo "✗ $patch_file cannot be applied with -p$patch_level"
-              return 1
+              echo "WARNING: $p skipped"
             fi
-          }
+          done
 
-          if ! apply_patch abi_bypass.patch 1; then
-            if ! apply_patch abi_bypass.patch 0; then
-              echo "WARNING: abi_bypass.patch cannot be applied. Skipping..."
-            fi
-          fi
-
-          if ! apply_patch sysvipc_fix.patch 1; then
-            if ! apply_patch sysvipc_fix.patch 0; then
-              echo "WARNING: sysvipc_fix.patch cannot be applied. Skipping..."
-            fi
-          fi
-
-          echo "Patch processing completed."
-
-      # =============== 4. Install dependencies ===============
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -128,8 +85,7 @@ jobs:
           wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
             sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb || true
 
-      # =============== 5. Setup Neutron Clang ===============
-      - name: Setup Neutron Clang toolchain
+      - name: Setup Neutron Clang
         run: |
           mkdir -p $HOME/toolchains
           cd $HOME/toolchains
@@ -142,7 +98,6 @@ jobs:
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      # =============== 6. Environment variables ===============
       - name: Set environment variables
         run: |
           echo "KERNEL_ROOT=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
@@ -150,7 +105,6 @@ jobs:
           echo "KBUILD_BUILD_USER=@ravindu644" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=${HOME}/toolchains/neutron-clang-*/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
-      # =============== 7. Build kernel with custom defconfig ===============
       - name: Build kernel
         id: build
         run: |
@@ -158,7 +112,6 @@ jobs:
           export CLANG_DIR="${HOME}/toolchains/$(ls -d ${HOME}/toolchains/neutron-clang-* | head -n1)"
           export PATH="${CLANG_DIR}/bin:${PATH}"
           export CC="${CLANG_DIR}/bin/clang"
-
           BUILD_OPTIONS=(
             -C "${KERNEL_ROOT}"
             O="${KERNEL_ROOT}/out"
@@ -179,13 +132,9 @@ jobs:
             HOSTCC="${CC}"
             HOSTCXX="${CC}++"
           )
-
           mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
-
-          # Gunakan defconfig khusus KernelSU + Susfs (pastikan file ada)
           make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
           make "${BUILD_OPTIONS[@]}" Image
-
           if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
             echo "exit_code=0" >> $GITHUB_OUTPUT
           else
@@ -193,8 +142,7 @@ jobs:
             exit 1
           fi
 
-      # =============== 8. Collect artifacts ===============
-      - name: Collect artifacts (kernel image only)
+      - name: Collect artifacts
         if: steps.build.outputs.exit_code == 0
         run: |
           mkdir -p artifacts
