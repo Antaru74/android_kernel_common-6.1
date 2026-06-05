@@ -17,20 +17,6 @@ jobs:
           fetch-depth: 1
           submodules: 'recursive'
 
-      - name: Download and apply KernelSU patch (6.1)
-        run: |
-          curl -L -o kernelsu_6.1.patch https://raw.githubusercontent.com/tiann/KernelSU/main/kernel_patches/KernelSU-6.1.patch
-          if patch -p1 -N --dry-run < kernelsu_6.1.patch 2>/dev/null; then
-            patch -p1 -N < kernelsu_6.1.patch
-            echo "KernelSU patch applied with -p1"
-          elif patch -p0 -N --dry-run < kernelsu_6.1.patch 2>/dev/null; then
-            patch -p0 -N < kernelsu_6.1.patch
-            echo "KernelSU patch applied with -p0"
-          else
-            echo "Failed to apply KernelSU patch"
-            exit 1
-          fi
-
       - name: Clone susfs4ksu
         run: |
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1 ksu
