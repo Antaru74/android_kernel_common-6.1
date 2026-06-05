@@ -23,38 +23,49 @@ jobs:
 
       - name: Apply Susfs main patch
         run: |
-          if patch -p1 -N --dry-run < ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch 2>/dev/null; then
-            patch -p1 -N < ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
-          elif patch -p0 -N --dry-run < ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch 2>/dev/null; then
-            patch -p0 -N < ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
-          else
-            echo "Failed to apply Susfs main patch"
-            exit 1
-          fi
+          PATCH_FILE="ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
+          for level in 1 0; do
+            if patch -p$level -N --dry-run --batch --no-backup-if-mismatch -F 3 < $PATCH_FILE 2>/dev/null; then
+              patch -p$level -N --batch --no-backup-if-mismatch -F 3 < $PATCH_FILE
+              echo "Susfs main patch applied with -p$level"
+              break
+            fi
+            if [ $level -eq 0 ]; then
+              echo "Failed to apply Susfs main patch"
+              exit 1
+            fi
+          done
 
       - name: Apply Susfs-KernelSU integration patch
         run: |
-          if patch -p1 -N --dry-run < ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch 2>/dev/null; then
-            patch -p1 -N < ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
-          elif patch -p0 -N --dry-run < ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch 2>/dev/null; then
-            patch -p0 -N < ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
-          else
-            echo "Failed to apply integration patch"
-            exit 1
-          fi
+          PATCH_FILE="ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          for level in 1 0; do
+            if patch -p$level -N --dry-run --batch --no-backup-if-mismatch -F 3 < $PATCH_FILE 2>/dev/null; then
+              patch -p$level -N --batch --no-backup-if-mismatch -F 3 < $PATCH_FILE
+              echo "Integration patch applied with -p$level"
+              break
+            fi
+            if [ $level -eq 0 ]; then
+              echo "Failed to apply integration patch"
+              exit 1
+            fi
+          done
 
       - name: Download and apply other patches
         run: |
           curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
           curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
-          for p in abi_bypass.patch sysvipc_fix.patch; do
-            if patch -p1 -N --dry-run < $p 2>/dev/null; then
-              patch -p1 -N < $p
-            elif patch -p0 -N --dry-run < $p 2>/dev/null; then
-              patch -p0 -N < $p
-            else
-              echo "WARNING: $p skipped"
-            fi
+          for patch_file in abi_bypass.patch sysvipc_fix.patch; do
+            for level in 1 0; do
+              if patch -p$level -N --dry-run --batch --no-backup-if-mismatch < $patch_file 2>/dev/null; then
+                patch -p$level -N --batch --no-backup-if-mismatch < $patch_file
+                echo "$patch_file applied with -p$level"
+                break
+              fi
+              if [ $level -eq 0 ]; then
+                echo "WARNING: $patch_file skipped"
+              fi
+            done
           done
 
       - name: Install build dependencies
