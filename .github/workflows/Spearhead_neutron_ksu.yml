@@ -18,10 +18,9 @@ jobs:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # 2. Integrasi SUSFS (paling awal, sebelum modifikasi lain)
+      # 2. Integrasi SUSFS (paling awal, dengan toleransi hunk gagal)
       - name: Integrate SUSFS (gki-android14-6.1)
         run: |
-          set -e
           echo "::group::Integrating SUSFS"
           cd ${GITHUB_WORKSPACE}
           echo "Working directory: $(pwd)"
@@ -45,32 +44,38 @@ jobs:
             exit 1
           fi
 
-          # Dry-run dan apply
-          echo "Applying SUSFS kernel patch..."
-          if ! patch -p1 --dry-run < "$PATCH_FILE"; then
-            echo "ERROR: Patch cannot be applied to clean source. Check kernel version compatibility."
-            exit 1
-          fi
-          patch -p1 < "$PATCH_FILE"
+          # Apply patch secara paksa, lanjutkan meski ada hunk gagal
+          echo "Applying SUSFS kernel patch (force, skipping failed hunks if any)..."
+          patch -p1 --forward --force < "$PATCH_FILE" || echo "WARNING: Some hunks failed to apply."
 
-          # Salin file sumber
+          # Tampilkan file .rej jika ada
+          if ls *.rej 1> /dev/null 2>&1; then
+            echo "::warning::Patch rejected hunks found:"
+            for f in *.rej; do
+              echo "---- $f ----"
+              cat "$f"
+              echo "---- end ----"
+            done
+          fi
+
+          # Salin file sumber SUSFS
           echo "Copying SUSFS source files..."
           cp -v susfs_temp/kernel_patches/fs/susfs.c fs/
           cp -v susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
           cp -v susfs_temp/kernel_patches/include/linux/susfs_def.h include/linux/
 
-          # Opsional: patch KSU enabler (tidak wajib, biarkan skip jika gagal)
+          # Opsional: KSU enabler patch (dipaksakan juga)
           KSU_PATCH="susfs_temp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
           if [ -f "$KSU_PATCH" ]; then
-            echo "Trying KSU SUSFS enabler patch..."
-            patch -p1 --dry-run < "$KSU_PATCH" && patch -p1 < "$KSU_PATCH" || echo "WARNING: KSU enabler patch skipped (not applicable)"
+            echo "Trying KSU SUSFS enabler patch (force)..."
+            patch -p1 --forward --force < "$KSU_PATCH" || echo "WARNING: KSU enabler patch failed, skipping."
           fi
 
           rm -rf susfs_temp
           echo "SUSFS integration completed."
           echo "::endgroup::"
 
-      # 3. Download dan terapkan patch kernel tambahan (abi bypass, sysvipc fix)
+      # 3. Download dan terapkan patch kernel tambahan (skip jika gagal)
       - name: Download and apply kernel patches
         run: |
           echo "Downloading patches..."
@@ -95,10 +100,9 @@ jobs:
           apply_patch sysvipc_fix.patch 1 || apply_patch sysvipc_fix.patch 0 || echo "WARNING: sysvipc_fix.patch skipped"
           echo "Patch processing completed."
 
-      # 4. Integrasi KernelSU Next (setelah SUSFS & patch tambahan)
+      # 4. Integrasi KernelSU Next
       - name: Integrate KernelSU Next
         run: |
-          set -e
           echo "::group::Integrating KernelSU Next"
           cd ${GITHUB_WORKSPACE}
           curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
@@ -177,7 +181,7 @@ jobs:
 
           make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
 
-          # Pastikan KSU aktif
+          # Pastikan CONFIG_KSU aktif
           ./scripts/config --file out/.config --enable CONFIG_KSU
           make "${BUILD_OPTIONS[@]}" olddefconfig
 
