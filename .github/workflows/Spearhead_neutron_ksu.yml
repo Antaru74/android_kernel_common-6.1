@@ -1,4 +1,4 @@
-name: Build Kernel 6.1 Neutron with KernelSU & Susfs
+name: Build Kernel 6.1 with KernelSU-Next & Susfs
 
 on:
   workflow_dispatch:
@@ -17,44 +17,43 @@ jobs:
           fetch-depth: 1
           submodules: 'recursive'
 
-      - name: Clone susfs4ksu
+      # =============== 1. Setup KernelSU-Next ===============
+      - name: Setup KernelSU-Next
         run: |
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1 ksu
+          # Clone KernelSU-Next repository
+          git clone https://github.com/KernelSU-Next/KernelSU-Next.git --depth=1
+          
+          # Jalankan setup script dari KernelSU-Next
+          cd KernelSU-Next
+          # Optional: tentukan versi tertentu, misal: bash setup.sh v1.0.5
+          bash kernel/setup.sh
+          cd ..
+          
+          echo "KernelSU-Next setup completed"
 
-      - name: Apply Susfs main patch
+      # =============== 2. Setup Susfs untuk KernelSU-Next ===============
+      - name: Setup Susfs for KernelSU-Next
         run: |
-          PATCH_FILE="ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-          for level in 1 0; do
-            if patch -p$level -N --dry-run --batch --no-backup-if-mismatch -F 3 < $PATCH_FILE 2>/dev/null; then
-              patch -p$level -N --batch --no-backup-if-mismatch -F 3 < $PATCH_FILE
-              echo "Susfs main patch applied with -p$level"
-              break
-            fi
-            if [ $level -eq 0 ]; then
-              echo "Failed to apply Susfs main patch"
-              exit 1
-            fi
-          done
+          # Clone susfs4ksu repository
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1
+          
+          # Copy Susfs kernel modules ke direktori yang benar
+          cp -r susfs4ksu/kernel_patches/fs/susfs.c fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/susfs*.h include/linux/
+          
+          # Apply patch integrasi Susfs dengan KernelSU-Next
+          cd KernelSU-Next
+          patch -p1 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          cd ..
+          
+          echo "Susfs integration completed"
 
-      - name: Apply Susfs-KernelSU integration patch
-        run: |
-          PATCH_FILE="ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-          for level in 1 0; do
-            if patch -p$level -N --dry-run --batch --no-backup-if-mismatch -F 3 < $PATCH_FILE 2>/dev/null; then
-              patch -p$level -N --batch --no-backup-if-mismatch -F 3 < $PATCH_FILE
-              echo "Integration patch applied with -p$level"
-              break
-            fi
-            if [ $level -eq 0 ]; then
-              echo "Failed to apply integration patch"
-              exit 1
-            fi
-          done
-
+      # =============== 3. Apply other patches ===============
       - name: Download and apply other patches
         run: |
           curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
           curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
+          
           for patch_file in abi_bypass.patch sysvipc_fix.patch; do
             for level in 1 0; do
               if patch -p$level -N --dry-run --batch --no-backup-if-mismatch < $patch_file 2>/dev/null; then
@@ -62,12 +61,10 @@ jobs:
                 echo "$patch_file applied with -p$level"
                 break
               fi
-              if [ $level -eq 0 ]; then
-                echo "WARNING: $patch_file skipped"
-              fi
             done
           done
 
+      # =============== 4. Install dependencies ===============
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -82,6 +79,7 @@ jobs:
           wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
             sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb || true
 
+      # =============== 5. Setup Neutron Clang ===============
       - name: Setup Neutron Clang
         run: |
           mkdir -p $HOME/toolchains
@@ -95,6 +93,7 @@ jobs:
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
+      # =============== 6. Environment variables ===============
       - name: Set environment variables
         run: |
           echo "KERNEL_ROOT=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
@@ -102,6 +101,7 @@ jobs:
           echo "KBUILD_BUILD_USER=@ravindu644" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=${HOME}/toolchains/neutron-clang-*/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
+      # =============== 7. Build kernel ===============
       - name: Build kernel
         id: build
         run: |
@@ -109,6 +109,7 @@ jobs:
           export CLANG_DIR="${HOME}/toolchains/$(ls -d ${HOME}/toolchains/neutron-clang-* | head -n1)"
           export PATH="${CLANG_DIR}/bin:${PATH}"
           export CC="${CLANG_DIR}/bin/clang"
+          
           BUILD_OPTIONS=(
             -C "${KERNEL_ROOT}"
             O="${KERNEL_ROOT}/out"
@@ -129,9 +130,25 @@ jobs:
             HOSTCC="${CC}"
             HOSTCXX="${CC}++"
           )
+          
           mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
+          
+          # Gunakan defconfig khusus
           make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
+          
+          # Tambahkan konfigurasi Susfs ke .config
+          echo "CONFIG_KSU=y" >> .config
+          echo "CONFIG_KSU_SUSFS=y" >> .config
+          echo "CONFIG_SUSFS=y" >> .config
+          echo "CONFIG_SUSFS_HIDE_MOUNTS=y" >> .config
+          echo "CONFIG_SUSFS_SUS_PATH=y" >> .config
+          echo "CONFIG_SUSFS_OVERLAYFS=y" >> .config
+          echo "CONFIG_SUSFS_SPOOF_UNAME=y" >> .config
+          echo "CONFIG_SUSFS_ENABLE_LOG=y" >> .config
+          
+          make "${BUILD_OPTIONS[@]}" olddefconfig
           make "${BUILD_OPTIONS[@]}" Image
+          
           if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
             echo "exit_code=0" >> $GITHUB_OUTPUT
           else
@@ -139,6 +156,7 @@ jobs:
             exit 1
           fi
 
+      # =============== 8. Collect artifacts ===============
       - name: Collect artifacts
         if: steps.build.outputs.exit_code == 0
         run: |
@@ -150,5 +168,5 @@ jobs:
         if: steps.build.outputs.exit_code == 0
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image-spearhead-ksu-susfs
+          name: kernel-image-spearhead-ksu-next-susfs
           path: artifacts
