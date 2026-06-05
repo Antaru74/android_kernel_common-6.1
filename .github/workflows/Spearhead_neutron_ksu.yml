@@ -17,43 +17,38 @@ jobs:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # =============== 1. Setup KernelSU-Next ===============
-      - name: Setup KernelSU-Next
+      # =============== 1. Install KernelSU-Next (official method) ===============
+      - name: Install KernelSU-Next
         run: |
-          # Clone KernelSU-Next repository
-          git clone https://github.com/KernelSU-Next/KernelSU-Next.git --depth=1
-          
-          # Jalankan setup script dari KernelSU-Next
-          cd KernelSU-Next
-          # Optional: tentukan versi tertentu, misal: bash setup.sh v1.0.5
-          bash kernel/setup.sh
-          cd ..
-          
-          echo "KernelSU-Next setup completed"
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+          echo "KernelSU-Next installed successfully"
 
-      # =============== 2. Setup Susfs untuk KernelSU-Next ===============
-      - name: Setup Susfs for KernelSU-Next
+      # =============== 2. Setup Susfs ===============
+      - name: Clone susfs4ksu repository
         run: |
-          # Clone susfs4ksu repository
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1
-          
-          # Copy Susfs kernel modules ke direktori yang benar
-          cp -r susfs4ksu/kernel_patches/fs/susfs.c fs/
-          cp -r susfs4ksu/kernel_patches/include/linux/susfs*.h include/linux/
-          
-          # Apply patch integrasi Susfs dengan KernelSU-Next
-          cd KernelSU-Next
-          patch -p1 < ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
-          cd ..
-          
-          echo "Susfs integration completed"
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1 susfs
 
-      # =============== 3. Apply other patches ===============
+      - name: Copy Susfs kernel files
+        run: |
+          cp susfs/kernel_patches/fs/susfs.c fs/
+          cp susfs/kernel_patches/include/linux/susfs.h include/linux/
+          cp susfs/kernel_patches/include/linux/susfs_def.h include/linux/
+
+      - name: Apply Susfs integration patch to KernelSU-Next
+        run: |
+          cd KernelSU-Next
+          patch -p1 < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+          cd ..
+
+      - name: Apply main Susfs patch to kernel
+        run: |
+          patch -p1 < susfs/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+
+      # =============== 3. Apply other patches (ABI bypass, sysvipc) ===============
       - name: Download and apply other patches
         run: |
           curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
           curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
-          
           for patch_file in abi_bypass.patch sysvipc_fix.patch; do
             for level in 1 0; do
               if patch -p$level -N --dry-run --batch --no-backup-if-mismatch < $patch_file 2>/dev/null; then
@@ -64,7 +59,7 @@ jobs:
             done
           done
 
-      # =============== 4. Install dependencies ===============
+      # =============== 4. Install build dependencies ===============
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -109,7 +104,7 @@ jobs:
           export CLANG_DIR="${HOME}/toolchains/$(ls -d ${HOME}/toolchains/neutron-clang-* | head -n1)"
           export PATH="${CLANG_DIR}/bin:${PATH}"
           export CC="${CLANG_DIR}/bin/clang"
-          
+
           BUILD_OPTIONS=(
             -C "${KERNEL_ROOT}"
             O="${KERNEL_ROOT}/out"
@@ -130,25 +125,14 @@ jobs:
             HOSTCC="${CC}"
             HOSTCXX="${CC}++"
           )
-          
-          mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
-          
-          # Gunakan defconfig khusus
+
+          mkdir -p "${KERNEL_ROOT}/out"
+
+          # Gunakan defconfig khusus (pastikan file spearhead2ksu_defconfig ada di arch/arm64/configs/)
           make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
-          
-          # Tambahkan konfigurasi Susfs ke .config
-          echo "CONFIG_KSU=y" >> .config
-          echo "CONFIG_KSU_SUSFS=y" >> .config
-          echo "CONFIG_SUSFS=y" >> .config
-          echo "CONFIG_SUSFS_HIDE_MOUNTS=y" >> .config
-          echo "CONFIG_SUSFS_SUS_PATH=y" >> .config
-          echo "CONFIG_SUSFS_OVERLAYFS=y" >> .config
-          echo "CONFIG_SUSFS_SPOOF_UNAME=y" >> .config
-          echo "CONFIG_SUSFS_ENABLE_LOG=y" >> .config
-          
           make "${BUILD_OPTIONS[@]}" olddefconfig
           make "${BUILD_OPTIONS[@]}" Image
-          
+
           if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
             echo "exit_code=0" >> $GITHUB_OUTPUT
           else
