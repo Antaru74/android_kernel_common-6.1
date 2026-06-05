@@ -11,17 +11,68 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. Checkout repository kernel
+      # 1. Checkout repository kernel (source bersih)
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # 2. Download dan terapkan patch kernel tambahan (skip jika gagal)
-      - name: Download and apply kernel patches
+      # 2. Integrasi SUSFS (paling awal, sebelum modifikasi lain)
+      - name: Integrate SUSFS (gki-android14-6.1)
         run: |
           set -e
+          echo "::group::Integrating SUSFS"
+          cd ${GITHUB_WORKSPACE}
+          echo "Working directory: $(pwd)"
+
+          # Clone SUSFS4KSU
+          echo "Cloning SUSFS4KSU repository..."
+          RETRIES=3
+          for i in $(seq 1 $RETRIES); do
+            git clone -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp --depth=1 && break
+            echo "Clone attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+          if [ ! -d susfs_temp ]; then
+            echo "ERROR: Failed to clone SUSFS repository after $RETRIES attempts."
+            exit 1
+          fi
+
+          PATCH_FILE="susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo "ERROR: Patch file $PATCH_FILE not found."
+            exit 1
+          fi
+
+          # Dry-run dan apply
+          echo "Applying SUSFS kernel patch..."
+          if ! patch -p1 --dry-run < "$PATCH_FILE"; then
+            echo "ERROR: Patch cannot be applied to clean source. Check kernel version compatibility."
+            exit 1
+          fi
+          patch -p1 < "$PATCH_FILE"
+
+          # Salin file sumber
+          echo "Copying SUSFS source files..."
+          cp -v susfs_temp/kernel_patches/fs/susfs.c fs/
+          cp -v susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
+          cp -v susfs_temp/kernel_patches/include/linux/susfs_def.h include/linux/
+
+          # Opsional: patch KSU enabler (tidak wajib, biarkan skip jika gagal)
+          KSU_PATCH="susfs_temp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          if [ -f "$KSU_PATCH" ]; then
+            echo "Trying KSU SUSFS enabler patch..."
+            patch -p1 --dry-run < "$KSU_PATCH" && patch -p1 < "$KSU_PATCH" || echo "WARNING: KSU enabler patch skipped (not applicable)"
+          fi
+
+          rm -rf susfs_temp
+          echo "SUSFS integration completed."
+          echo "::endgroup::"
+
+      # 3. Download dan terapkan patch kernel tambahan (abi bypass, sysvipc fix)
+      - name: Download and apply kernel patches
+        run: |
           echo "Downloading patches..."
           curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
           curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
@@ -44,10 +95,19 @@ jobs:
           apply_patch sysvipc_fix.patch 1 || apply_patch sysvipc_fix.patch 0 || echo "WARNING: sysvipc_fix.patch skipped"
           echo "Patch processing completed."
 
-      # 3. Install build dependencies
-      - name: Install build dependencies
+      # 4. Integrasi KernelSU Next (setelah SUSFS & patch tambahan)
+      - name: Integrate KernelSU Next
         run: |
           set -e
+          echo "::group::Integrating KernelSU Next"
+          cd ${GITHUB_WORKSPACE}
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
+          echo "KernelSU Next integration complete."
+          echo "::endgroup::"
+
+      # 5. Install build dependencies
+      - name: Install build dependencies
+        run: |
           sudo apt update
           sudo apt install -y git device-tree-compiler lz4 xz-utils zlib1g-dev \
             openjdk-17-jdk gcc g++ python3 python-is-python3 p7zip-full \
@@ -61,86 +121,9 @@ jobs:
             sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb || true
           rm -f libtinfo5_6.3-2ubuntu0.1_amd64.deb
 
-      # 4. Integrasi SUSFS (dilakukan lebih dulu agar tidak konflik dengan KSU)
-      - name: Integrate SUSFS (gki-android14-6.1)
-        run: |
-          set -e
-          echo "::group::Integrating SUSFS"
-
-          # Pindah ke root kernel source
-          cd ${GITHUB_WORKSPACE}
-          echo "Working directory: $(pwd)"
-
-          # Clone dengan retry
-          echo "Cloning SUSFS4KSU repository..."
-          RETRIES=3
-          for i in $(seq 1 $RETRIES); do
-            git clone -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp --depth=1 && break
-            echo "Clone attempt $i failed, retrying in 5s..."
-            sleep 5
-          done
-          if [ ! -d susfs_temp ]; then
-            echo "ERROR: Failed to clone SUSFS repository after $RETRIES attempts."
-            exit 1
-          fi
-
-          # Verifikasi file patch utama
-          PATCH_FILE="susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-          if [ ! -f "$PATCH_FILE" ]; then
-            echo "ERROR: Patch file $PATCH_FILE not found. Check repository structure."
-            exit 1
-          fi
-
-          # Dry-run patch
-          echo "Checking patch applicability (dry-run)..."
-          if ! patch -p1 --dry-run < "$PATCH_FILE"; then
-            echo "ERROR: Patch cannot be applied. Kernel source might have conflicting modifications."
-            exit 1
-          fi
-
-          # Terapkan patch
-          echo "Applying SUSFS kernel patch..."
-          patch -p1 < "$PATCH_FILE"
-
-          # Salin file sumber
-          echo "Copying SUSFS source files..."
-          cp -v susfs_temp/kernel_patches/fs/susfs.c fs/
-          cp -v susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
-          cp -v susfs_temp/kernel_patches/include/linux/susfs_def.h include/linux/
-
-          # Opsional: aktifkan hook SUSFS di KernelSU
-          KSU_PATCH="susfs_temp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-          if [ -f "$KSU_PATCH" ]; then
-            echo "Found KSU enabler patch, trying dry-run..."
-            if patch -p1 --dry-run < "$KSU_PATCH"; then
-              patch -p1 < "$KSU_PATCH"
-              echo "KSU SUSFS enabler patch applied."
-            else
-              echo "WARNING: KSU SUSFS enabler patch not applicable. Skipping."
-            fi
-          else
-            echo "No KSU enabler patch found, skipping."
-          fi
-
-          # Bersihkan
-          rm -rf susfs_temp
-          echo "SUSFS integration completed successfully."
-          echo "::endgroup::"
-
-      # 5. Integrasi KernelSU Next (setelah SUSFS)
-      - name: Integrate KernelSU Next
-        run: |
-          set -e
-          echo "::group::Integrating KernelSU Next"
-          cd ${GITHUB_WORKSPACE}
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
-          echo "KernelSU Next integration complete."
-          echo "::endgroup::"
-
       # 6. Setup Neutron Clang toolchain
       - name: Setup Neutron Clang toolchain
         run: |
-          set -e
           mkdir -p $HOME/toolchains
           cd $HOME/toolchains
           curl -L -o neutron-clang.tar.zst https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/03062026/neutron-clang-03062026.tar.zst
@@ -164,7 +147,6 @@ jobs:
       - name: Build kernel
         id: build
         run: |
-          set -e
           export KERNEL_ROOT="${GITHUB_WORKSPACE}"
           export CLANG_DIR="${HOME}/toolchains/$(ls -d ${HOME}/toolchains/neutron-clang-* | head -n1)"
           export PATH="${CLANG_DIR}/bin:${PATH}"
@@ -193,14 +175,12 @@ jobs:
 
           mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
 
-          # Buat defconfig (spearhead2ksu_defconfig harus tersedia di arch/arm64/configs/)
           make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
 
-          # Pastikan CONFIG_KSU aktif
+          # Pastikan KSU aktif
           ./scripts/config --file out/.config --enable CONFIG_KSU
           make "${BUILD_OPTIONS[@]}" olddefconfig
 
-          # Build Image
           make "${BUILD_OPTIONS[@]}" Image
 
           if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
@@ -214,7 +194,6 @@ jobs:
       - name: Collect artifacts (kernel image only)
         if: steps.build.outputs.exit_code == 0
         run: |
-          set -e
           mkdir -p artifacts
           cp out/arch/arm64/boot/Image artifacts/
           cp out/arch/arm64/boot/Image.lz4 artifacts/ || true
