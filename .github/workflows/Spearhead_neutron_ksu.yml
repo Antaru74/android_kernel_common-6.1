@@ -1,4 +1,4 @@
-name: Build Kernel 6.1 with KernelSU-Next & Susfs
+name: Build Kernel 6.1 Neutron + KSU Next + SUSFS
 
 on:
   workflow_dispatch:
@@ -11,74 +11,40 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # 1. Checkout repository kernel
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # =============== 1. Install KernelSU-Next (official method) ===============
-      - name: Install KernelSU-Next
+      # 2. Download dan terapkan patch kernel tambahan (skip jika gagal)
+      - name: Download and apply kernel patches
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
-          echo "KernelSU-Next installed successfully"
-
-      # =============== 2. Setup Susfs (with fallback and fuzz) ===============
-      - name: Clone susfs4ksu repository (try dev branch first)
-        run: |
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1-dev --depth=1 susfs || \
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 --depth=1 susfs
-
-      - name: Copy Susfs kernel files
-        run: |
-          cp susfs/kernel_patches/fs/susfs.c fs/
-          cp susfs/kernel_patches/include/linux/susfs.h include/linux/
-          cp susfs/kernel_patches/include/linux/susfs_def.h include/linux/
-
-      - name: Apply main Susfs patch to kernel (with fuzz)
-        run: |
-          if patch -p1 --fuzz=3 --no-backup-if-mismatch --batch < susfs/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch; then
-            echo "Main Susfs patch applied with -p1"
-          else
-            echo "Patch -p1 failed, trying -p0..."
-            if patch -p0 --fuzz=3 --no-backup-if-mismatch --batch < susfs/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch; then
-              echo "Main Susfs patch applied with -p0"
-            else
-              echo "WARNING: Main Susfs patch partially failed. Build will continue, but Susfs may not work."
-            fi
-          fi
-
-      - name: Apply Susfs integration patch to KernelSU-Next (with fuzz)
-        run: |
-          cd KernelSU-Next
-          if patch -p1 --fuzz=3 --no-backup-if-mismatch --batch < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch; then
-            echo "Integration patch applied with -p1"
-          else
-            echo "Patch -p1 failed, trying -p0..."
-            if patch -p0 --fuzz=3 --no-backup-if-mismatch --batch < ../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch; then
-              echo "Integration patch applied with -p0"
-            else
-              echo "WARNING: Integration patch failed. Susfs may not fully work."
-            fi
-          fi
-          cd ..
-
-      # =============== 3. Apply other patches (ABI bypass, sysvipc) ===============
-      - name: Download and apply other patches
-        run: |
+          echo "Downloading patches..."
           curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
           curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
-          for patch_file in abi_bypass.patch sysvipc_fix.patch; do
-            for level in 1 0; do
-              if patch -p$level -N --dry-run --batch --no-backup-if-mismatch < $patch_file 2>/dev/null; then
-                patch -p$level -N --batch --no-backup-if-mismatch < $patch_file
-                echo "$patch_file applied with -p$level"
-                break
-              fi
-            done
-          done
 
-      # =============== 4. Install build dependencies ===============
+          apply_patch() {
+            local patch_file=$1
+            local patch_level=$2
+            echo "Trying to apply $patch_file with -p$patch_level..."
+            if patch -p$patch_level -N --dry-run < "$patch_file" > /dev/null 2>&1; then
+              patch -p$patch_level -N < "$patch_file"
+              echo "✓ $patch_file applied successfully with -p$patch_level"
+              return 0
+            else
+              echo "✗ $patch_file cannot be applied with -p$patch_level"
+              return 1
+            fi
+          }
+
+          apply_patch abi_bypass.patch 1 || apply_patch abi_bypass.patch 0 || echo "WARNING: abi_bypass.patch skipped"
+          apply_patch sysvipc_fix.patch 1 || apply_patch sysvipc_fix.patch 0 || echo "WARNING: sysvipc_fix.patch skipped"
+
+          echo "Patch processing completed."
+
+      # 3. Install build dependencies
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -90,11 +56,45 @@ jobs:
             grep tofrodos python3-markdown libxml2-utils xsltproc libtinfo6 \
             cpio kmod openssl libelf-dev pahole libssl-dev libarchive-tools \
             zstd rsync
-          wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
+          # Install libtinfo5 (diperlukan oleh beberapa toolchain lama)
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
             sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb || true
+          rm -f libtinfo5_6.3-2ubuntu0.1_amd64.deb
 
-      # =============== 5. Setup Neutron Clang ===============
-      - name: Setup Neutron Clang
+      # 4. Integrasi KernelSU Next
+      - name: Integrate KernelSU Next
+        run: |
+          echo "::group::Integrating KernelSU Next"
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
+          echo "::endgroup::"
+
+      # 5. Integrasi SUSFS untuk GKI android14-6.1
+      - name: Integrate SUSFS (gki-android14-6.1)
+        run: |
+          echo "::group::Integrating SUSFS"
+          echo "Cloning SUSFS4KSU repository..."
+          git clone -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp --depth=1
+
+          echo "Applying SUSFS kernel patch..."
+          # Pastikan kernel root adalah direktori kerja (GITHUB_WORKSPACE)
+          patch -p1 < susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch
+
+          echo "Copying SUSFS source files..."
+          cp susfs_temp/kernel_patches/fs/susfs.c fs/
+          cp susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
+          cp susfs_temp/kernel_patches/include/linux/susfs_def.h include/linux/
+
+          # Opsional: aktifkan hook SUSFS di KernelSU jika diperlukan
+          if [ -f susfs_temp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ]; then
+            echo "Applying KSU SUSFS enabler patch..."
+            patch -p1 < susfs_temp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || echo "WARNING: KSU SUSFS patch failed, maybe not needed"
+          fi
+
+          rm -rf susfs_temp
+          echo "::endgroup::"
+
+      # 6. Setup toolchain Neutron Clang
+      - name: Setup Neutron Clang toolchain
         run: |
           mkdir -p $HOME/toolchains
           cd $HOME/toolchains
@@ -107,15 +107,16 @@ jobs:
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      # =============== 6. Environment variables ===============
+      # 7. Set environment variables
       - name: Set environment variables
         run: |
           echo "KERNEL_ROOT=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "KBUILD_BUILD_USER=@ravindu644" >> $GITHUB_ENV
+          # LD_LIBRARY_PATH untuk shared libs clang (opsional)
           echo "LD_LIBRARY_PATH=${HOME}/toolchains/neutron-clang-*/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
-      # =============== 7. Build kernel ===============
+      # 8. Build kernel
       - name: Build kernel
         id: build
         run: |
@@ -145,13 +146,20 @@ jobs:
             HOSTCXX="${CC}++"
           )
 
-          mkdir -p "${KERNEL_ROOT}/out"
+          mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
 
-          # Gunakan defconfig khusus (pastikan CONFIG_KSU=y dan CONFIG_KSU_SUSFS=y sudah ada)
+          # Buat defconfig (spearhead2_defconfig harus sudah ada di arch/arm64/configs/)
           make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
+
+          # Pastikan KSU dan SUSFS terkonfigurasi jika diperlukan
+          # Jika defconfig belum mengaktifkan KSU, aktifkan manual
+          ./scripts/config --file out/.config --enable CONFIG_KSU
           make "${BUILD_OPTIONS[@]}" olddefconfig
+
+          # Build kernel image
           make "${BUILD_OPTIONS[@]}" Image
 
+          # Verifikasi hasil build
           if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
             echo "exit_code=0" >> $GITHUB_OUTPUT
           else
@@ -159,17 +167,18 @@ jobs:
             exit 1
           fi
 
-      # =============== 8. Collect artifacts ===============
-      - name: Collect artifacts
+      # 9. Koleksi artifacts
+      - name: Collect artifacts (kernel image only)
         if: steps.build.outputs.exit_code == 0
         run: |
           mkdir -p artifacts
           cp out/arch/arm64/boot/Image artifacts/ || true
           cp out/arch/arm64/boot/Image.lz4 artifacts/ || true
 
+      # 10. Upload artifacts
       - name: Upload artifacts
         if: steps.build.outputs.exit_code == 0
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image-spearhead-ksu-next-susfs
-          path: artifacts
+          name: kernel-image-spearhead-ksu-susfs
+          path: artifacts/
