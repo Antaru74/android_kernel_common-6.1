@@ -1,4 +1,4 @@
-name: Build Kernel 6.1 Neutron + KSU Next + SUSFS
+name: Build Kernel 6.1 Neutron
 
 on:
   workflow_dispatch:
@@ -11,105 +11,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. Checkout repository kernel (source bersih)
-      - name: Checkout repository
+      - name: Checkout repository (depth=1)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # 2. Integrasi SUSFS (paling awal, dengan toleransi hunk gagal)
-      - name: Integrate SUSFS (gki-android14-6.1)
-        run: |
-          echo "::group::Integrating SUSFS"
-          cd ${GITHUB_WORKSPACE}
-          echo "Working directory: $(pwd)"
+      # Cache untuk apt packages
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        id: cache-apt
+        with:
+          path: /var/cache/apt/archives
+          key: apt-cache-${{ runner.os }}-${{ hashFiles('**/apt-packages.txt') }}
+          restore-keys: |
+            apt-cache-${{ runner.os }}-
 
-          # Clone SUSFS4KSU
-          echo "Cloning SUSFS4KSU repository..."
-          RETRIES=3
-          for i in $(seq 1 $RETRIES); do
-            git clone -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp --depth=1 && break
-            echo "Clone attempt $i failed, retrying in 5s..."
-            sleep 5
-          done
-          if [ ! -d susfs_temp ]; then
-            echo "ERROR: Failed to clone SUSFS repository after $RETRIES attempts."
-            exit 1
-          fi
-
-          PATCH_FILE="susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-          if [ ! -f "$PATCH_FILE" ]; then
-            echo "ERROR: Patch file $PATCH_FILE not found."
-            exit 1
-          fi
-
-          # Apply patch secara paksa, lanjutkan meski ada hunk gagal
-          echo "Applying SUSFS kernel patch (force, skipping failed hunks if any)..."
-          patch -p1 --forward --force < "$PATCH_FILE" || echo "WARNING: Some hunks failed to apply."
-
-          # Tampilkan file .rej jika ada
-          if ls *.rej 1> /dev/null 2>&1; then
-            echo "::warning::Patch rejected hunks found:"
-            for f in *.rej; do
-              echo "---- $f ----"
-              cat "$f"
-              echo "---- end ----"
-            done
-          fi
-
-          # Salin file sumber SUSFS
-          echo "Copying SUSFS source files..."
-          cp -v susfs_temp/kernel_patches/fs/susfs.c fs/
-          cp -v susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
-          cp -v susfs_temp/kernel_patches/include/linux/susfs_def.h include/linux/
-
-          # Opsional: KSU enabler patch (dipaksakan juga)
-          KSU_PATCH="susfs_temp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-          if [ -f "$KSU_PATCH" ]; then
-            echo "Trying KSU SUSFS enabler patch (force)..."
-            patch -p1 --forward --force < "$KSU_PATCH" || echo "WARNING: KSU enabler patch failed, skipping."
-          fi
-
-          rm -rf susfs_temp
-          echo "SUSFS integration completed."
-          echo "::endgroup::"
-
-      # 3. Download dan terapkan patch kernel tambahan (skip jika gagal)
-      - name: Download and apply kernel patches
-        run: |
-          echo "Downloading patches..."
-          curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
-          curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
-
-          apply_patch() {
-            local patch_file=$1
-            local patch_level=$2
-            echo "Trying to apply $patch_file with -p$patch_level..."
-            if patch -p$patch_level -N --dry-run < "$patch_file" > /dev/null 2>&1; then
-              patch -p$patch_level -N < "$patch_file"
-              echo "✓ $patch_file applied successfully with -p$patch_level"
-              return 0
-            else
-              echo "✗ $patch_file cannot be applied with -p$patch_level"
-              return 1
-            fi
-          }
-
-          apply_patch abi_bypass.patch 1 || apply_patch abi_bypass.patch 0 || echo "WARNING: abi_bypass.patch skipped"
-          apply_patch sysvipc_fix.patch 1 || apply_patch sysvipc_fix.patch 0 || echo "WARNING: sysvipc_fix.patch skipped"
-          echo "Patch processing completed."
-
-      # 4. Integrasi KernelSU Next
-      - name: Integrate KernelSU Next
-        run: |
-          echo "::group::Integrating KernelSU Next"
-          cd ${GITHUB_WORKSPACE}
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
-          echo "KernelSU Next integration complete."
-          echo "::endgroup::"
-
-      # 5. Install build dependencies
       - name: Install build dependencies
         run: |
           sudo apt update
@@ -121,40 +38,136 @@ jobs:
             grep tofrodos python3-markdown libxml2-utils xsltproc libtinfo6 \
             cpio kmod openssl libelf-dev pahole libssl-dev libarchive-tools \
             zstd rsync
-          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
+          wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
             sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb || true
-          rm -f libtinfo5_6.3-2ubuntu0.1_amd64.deb
 
-      # 6. Setup Neutron Clang toolchain
-      - name: Setup Neutron Clang toolchain
+      # Cache untuk toolchain dengan compression
+      - name: Cache Neutron Clang toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/toolchains/neutron-clang-*
+            ~/.cache/ccache
+          key: neutron-clang-03062026-${{ runner.os }}-${{ hashFiles('**/Makefile') }}
+          restore-keys: |
+            neutron-clang-03062026-${{ runner.os }}
+            neutron-clang-${{ runner.os }}
+
+      - name: Download and apply kernel patches (skip if fails)
+        run: |
+          echo "Downloading patches..."
+          curl -L -o abi_bypass.patch https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
+          curl -L -o sysvipc_fix.patch https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
+
+          # Function to apply patch safely
+          apply_patch() {
+            local patch_file=$1
+            local patch_level=$2
+            echo "Trying to apply $patch_file with -p$patch_level..."
+            if patch -p$patch_level -N --dry-run < $patch_file > /dev/null 2>&1; then
+              patch -p$patch_level -N < $patch_file
+              echo "✓ $patch_file applied successfully with -p$patch_level"
+              return 0
+            else
+              echo "✗ $patch_file cannot be applied with -p$patch_level"
+              return 1
+            fi
+          }
+
+          # Try abi_bypass.patch with -p1 (standard)
+          if ! apply_patch abi_bypass.patch 1; then
+            # Try with -p0 just in case
+            if ! apply_patch abi_bypass.patch 0; then
+              echo "WARNING: abi_bypass.patch cannot be applied. Skipping..."
+            fi
+          fi
+
+          # Try sysvipc_fix.patch with -p1
+          if ! apply_patch sysvipc_fix.patch 1; then
+            if ! apply_patch sysvipc_fix.patch 0; then
+              echo "WARNING: sysvipc_fix.patch cannot be applied. Skipping..."
+            fi
+          fi
+
+          echo "Patch processing completed."
+
+      - name: Setup Neutron Clang toolchain with ccache
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           mkdir -p $HOME/toolchains
           cd $HOME/toolchains
           curl -L -o neutron-clang.tar.zst https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/03062026/neutron-clang-03062026.tar.zst
           tar -I zstd -xf neutron-clang.tar.zst
           rm neutron-clang.tar.zst
+          
+          # Setup ccache
+          sudo apt install -y ccache
+          ccache -M 5G
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=true" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          
           CLANG_DIR=$(ls -d neutron-clang-* | head -n1)
           echo "PATH=$HOME/toolchains/$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
           echo "CC=$HOME/toolchains/$CLANG_DIR/bin/clang" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      # 7. Set environment variables
+      - name: Setup ccache for cached toolchain
+        if: steps.cache-toolchain.outputs.cache-hit == 'true'
+        run: |
+          sudo apt install -y ccache
+          ccache -M 5G
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=true" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          
+          CLANG_DIR=$(ls -d $HOME/toolchains/neutron-clang-* | head -n1)
+          echo "PATH=$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
+          echo "CC=$CLANG_DIR/bin/clang" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+
       - name: Set environment variables
         run: |
           echo "KERNEL_ROOT=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "KBUILD_BUILD_USER=@ravindu644" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=${HOME}/toolchains/neutron-clang-*/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime" >> $GITHUB_ENV
 
-      # 8. Build kernel
-      - name: Build kernel
+      # Cache untuk kernel build outputs dengan ccache
+      - name: Cache kernel build
+        uses: actions/cache@v4
+        with:
+          path: |
+            out/
+            build/
+            ~/.cache/ccache
+          key: kernel-build-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: |
+            kernel-build-${{ github.sha }}-
+            kernel-build-
+
+      - name: Build kernel with optimizations
         id: build
         run: |
           export KERNEL_ROOT="${GITHUB_WORKSPACE}"
-          export CLANG_DIR="${HOME}/toolchains/$(ls -d ${HOME}/toolchains/neutron-clang-* | head -n1)"
+          export CLANG_DIR="$(ls -d ${HOME}/toolchains/neutron-clang-* | head -n1)"
           export PATH="${CLANG_DIR}/bin:${PATH}"
           export CC="${CLANG_DIR}/bin/clang"
+          
+          # Gunakan ccache
+          export CC="ccache ${CLANG_DIR}/bin/clang"
+          export CXX="ccache ${CLANG_DIR}/bin/clang++"
+          
+          # Optimasi build flags
+          export KCFLAGS="-O2 -pipe -fomit-frame-pointer -march=armv8-a+crc+crypto+fp16+rcpc+dotprod+sha3+fp16fml+rdm+lse+fp16+sha2+fp16fml+fp16 -mtune=neoverse-n1"
+          export CFLAGS="-O2 -pipe"
+          export CXXFLAGS="-O2 -pipe"
 
           BUILD_OPTIONS=(
             -C "${KERNEL_ROOT}"
@@ -166,46 +179,60 @@ jobs:
             CC="${CC}"
             LLVM=1
             LLVM_IAS=1
-            AR="$(dirname ${CC})/llvm-ar"
-            NM="$(dirname ${CC})/llvm-nm"
-            LD="$(dirname ${CC})/ld.lld"
-            STRIP="$(dirname ${CC})/llvm-strip"
-            OBJCOPY="$(dirname ${CC})/llvm-objcopy"
-            OBJDUMP="$(dirname ${CC})/llvm-objdump"
-            READELF="$(dirname ${CC})/llvm-readelf"
-            HOSTCC="${CC}"
-            HOSTCXX="${CC}++"
+            AR="$(dirname ${CLANG_DIR}/bin/clang)/llvm-ar"
+            NM="$(dirname ${CLANG_DIR}/bin/clang)/llvm-nm"
+            LD="$(dirname ${CLANG_DIR}/bin/clang)/ld.lld"
+            STRIP="$(dirname ${CLANG_DIR}/bin/clang)/llvm-strip"
+            OBJCOPY="$(dirname ${CLANG_DIR}/bin/clang)/llvm-objcopy"
+            OBJDUMP="$(dirname ${CLANG_DIR}/bin/clang)/llvm-objdump"
+            READELF="$(dirname ${CLANG_DIR}/bin/clang)/llvm-readelf"
+            HOSTCC="${CLANG_DIR}/bin/clang"
+            HOSTCXX="${CLANG_DIR}/bin/clang++"
+            KCFLAGS="${KCFLAGS}"
+            CFLAGS="${CFLAGS}"
+            CXXFLAGS="${CXXFLAGS}"
           )
 
           mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
 
-          make "${BUILD_OPTIONS[@]}" spearhead2ksu_defconfig
+          # Optimasi: skip defconfig jika sudah ada
+          if [ ! -f "${KERNEL_ROOT}/out/.config" ]; then
+            echo "Running defconfig..."
+            make "${BUILD_OPTIONS[@]}" spearhead2_defconfig
+          else
+            echo "Using existing .config file"
+          fi
 
-          # Pastikan CONFIG_KSU aktif
-          ./scripts/config --file out/.config --enable CONFIG_KSU
-          make "${BUILD_OPTIONS[@]}" olddefconfig
-
-          make "${BUILD_OPTIONS[@]}" Image
+          # Build hanya kernel dan modules yang diperlukan
+          echo "Building kernel image..."
+          time make "${BUILD_OPTIONS[@]}" Image
 
           if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
             echo "exit_code=0" >> $GITHUB_OUTPUT
+            echo "Build successful!"
           else
             echo "exit_code=1" >> $GITHUB_OUTPUT
             exit 1
           fi
+          
+          # Tampilkan statistik ccache
+          ccache -s
 
-      # 9. Koleksi artifacts
       - name: Collect artifacts (kernel image only)
         if: steps.build.outputs.exit_code == 0
         run: |
           mkdir -p artifacts
-          cp out/arch/arm64/boot/Image artifacts/
+          cp out/arch/arm64/boot/Image artifacts/ || true
           cp out/arch/arm64/boot/Image.lz4 artifacts/ || true
+          
+          # Tambahan: compress artifact untuk upload lebih cepat
+          cd artifacts
+          tar -czf kernel-image-spearhead.tar.gz Image Image.lz4 2>/dev/null || true
 
-      # 10. Upload artifacts
       - name: Upload artifacts
         if: steps.build.outputs.exit_code == 0
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image-spearhead-ksu-susfs
-          path: artifacts/
+          name: kernel-image-spearhead
+          path: artifacts/*
+          compression-level: 6
