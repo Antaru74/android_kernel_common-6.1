@@ -1,4 +1,4 @@
-name: Build Kernel 6.1 Neutron
+name: Speed up Build Kernel 6.1 Neutron
 
 on:
   workflow_dispatch:
