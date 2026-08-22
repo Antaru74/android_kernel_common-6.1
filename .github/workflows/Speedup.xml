@@ -1,0 +1,567 @@
+name: Speedup Build Kernel 6.1 Neutron + KSU Next + SUSFS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      # ============================================================
+      # 2. INTEGRATE SUSFS
+      # ============================================================
+      - name: Integrate SUSFS (gki-android14-6.1)
+        run: |
+          echo "::group::Integrating SUSFS"
+
+          cd "${GITHUB_WORKSPACE}"
+
+          echo "Working directory: $(pwd)"
+
+          echo "Cloning SUSFS4KSU repository..."
+
+          RETRIES=3
+
+          for i in $(seq 1 $RETRIES); do
+            git clone \
+              -b gki-android14-6.1 \
+              https://gitlab.com/simonpunk/susfs4ksu.git \
+              susfs_temp \
+              --depth=1 && break
+
+            echo "Clone attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
+
+          if [ ! -d susfs_temp ]; then
+            echo "ERROR: Failed to clone SUSFS repository after $RETRIES attempts."
+            exit 1
+          fi
+
+          PATCH_FILE="susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
+
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo "ERROR: Patch file $PATCH_FILE not found."
+            exit 1
+          fi
+
+          echo "Applying SUSFS kernel patch..."
+
+          patch -p1 --forward --force < "$PATCH_FILE" \
+            || echo "WARNING: Some SUSFS hunks failed to apply."
+
+          if ls *.rej 1> /dev/null 2>&1; then
+            echo "::warning::Patch rejected hunks found:"
+
+            for f in *.rej; do
+              echo "---- $f ----"
+              cat "$f"
+              echo "---- end ----"
+            done
+          fi
+
+          echo "Copying SUSFS source files..."
+
+          cp -v \
+            susfs_temp/kernel_patches/fs/susfs.c \
+            fs/
+
+          cp -v \
+            susfs_temp/kernel_patches/include/linux/susfs.h \
+            include/linux/
+
+          cp -v \
+            susfs_temp/kernel_patches/include/linux/susfs_def.h \
+            include/linux/
+
+          KSU_PATCH="susfs_temp/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+
+          if [ -f "$KSU_PATCH" ]; then
+            echo "Trying KSU SUSFS enabler patch..."
+
+            patch -p1 --forward --force < "$KSU_PATCH" \
+              || echo "WARNING: KSU enabler patch failed, skipping."
+          fi
+
+          rm -rf susfs_temp
+
+          echo "SUSFS integration completed."
+
+          echo "::endgroup::"
+
+      # ============================================================
+      # 3. ADDITIONAL KERNEL PATCHES
+      # ============================================================
+      - name: Download and apply kernel patches
+        run: |
+          echo "Downloading patches..."
+
+          curl -L \
+            -o abi_bypass.patch \
+            https://raw.githubusercontent.com/WildKernels/kernel_patches/main/wild/bypass_patches/abi_bypass_gki.patch
+
+          curl -L \
+            -o sysvipc_fix.patch \
+            https://raw.githubusercontent.com/Antaru74/GKI-6.1/master/kernel-patches/common/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
+
+          apply_patch() {
+            local patch_file=$1
+            local patch_level=$2
+
+            echo "Trying to apply $patch_file with -p$patch_level..."
+
+            if patch -p$patch_level -N --dry-run < "$patch_file" > /dev/null 2>&1; then
+
+              patch -p$patch_level -N < "$patch_file"
+
+              echo "✓ $patch_file applied successfully with -p$patch_level"
+
+              return 0
+
+            else
+
+              echo "✗ $patch_file cannot be applied with -p$patch_level"
+
+              return 1
+
+            fi
+          }
+
+          apply_patch abi_bypass.patch 1 \
+            || apply_patch abi_bypass.patch 0 \
+            || echo "WARNING: abi_bypass.patch skipped"
+
+          apply_patch sysvipc_fix.patch 1 \
+            || apply_patch sysvipc_fix.patch 0 \
+            || echo "WARNING: sysvipc_fix.patch skipped"
+
+          echo "Patch processing completed."
+
+      # ============================================================
+      # 4. KERNELSU NEXT
+      # ============================================================
+      - name: Integrate KernelSU Next
+        run: |
+          echo "::group::Integrating KernelSU Next"
+
+          cd "${GITHUB_WORKSPACE}"
+
+          curl -LSs \
+            "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -
+
+          echo "KernelSU Next integration complete."
+
+          echo "::endgroup::"
+
+      # ============================================================
+      # 5. BUILD DEPENDENCIES
+      # ============================================================
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+
+          sudo apt install -y \
+            git \
+            device-tree-compiler \
+            lz4 \
+            xz-utils \
+            zlib1g-dev \
+            openjdk-17-jdk \
+            gcc \
+            g++ \
+            python3 \
+            python-is-python3 \
+            p7zip-full \
+            android-sdk-libsparse-utils \
+            erofs-utils \
+            default-jdk \
+            gnupg \
+            flex \
+            bison \
+            gperf \
+            build-essential \
+            zip \
+            curl \
+            libc6-dev \
+            libncurses-dev \
+            libx11-dev \
+            libreadline-dev \
+            libgl1-mesa-dev \
+            sudo \
+            bc \
+            grep \
+            tofrodos \
+            python3-markdown \
+            libxml2-utils \
+            xsltproc \
+            libtinfo6 \
+            cpio \
+            kmod \
+            openssl \
+            libelf-dev \
+            pahole \
+            libssl-dev \
+            libarchive-tools \
+            zstd \
+            rsync \
+            ccache
+
+          wget -q \
+            http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb \
+            && sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb \
+            || true
+
+          rm -f libtinfo5_6.3-2ubuntu0.1_amd64.deb
+
+          echo "ccache version:"
+          ccache --version
+
+      # ============================================================
+      # 6. RESTORE CCACHE
+      # ============================================================
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: kernel-ccache-${{ runner.os }}-${{ hashFiles('Makefile', 'arch/arm64/Makefile', '.config') }}
+          restore-keys: |
+            kernel-ccache-${{ runner.os }}-
+
+      # ============================================================
+      # 7. CONFIGURE CCACHE
+      # ============================================================
+      - name: Configure ccache
+        run: |
+          mkdir -p "$HOME/.cache/ccache"
+
+          ccache --set-config=cache_dir="$HOME/.cache/ccache"
+          ccache --set-config=max_size=5G
+          ccache --set-config=compression=true
+
+          # Hindari path absolut workspace menjadi bagian penting
+          # dari identitas cache.
+          ccache --set-config=base_dir="${GITHUB_WORKSPACE}"
+          ccache --set-config=hash_dir=false
+
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPRESS=1" >> "$GITHUB_ENV"
+
+          echo "===== CCACHE CONFIG ====="
+          ccache --show-config
+
+          echo "===== CCACHE STATISTICS BEFORE BUILD ====="
+          ccache --show-stats
+
+      # ============================================================
+      # 8. SETUP NEUTRON CLANG CACHE
+      # ============================================================
+      - name: Restore Neutron Clang cache
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchains
+          key: neutron-clang-03062026-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            neutron-clang-03062026-${{ runner.os }}-
+
+      # ============================================================
+      # 9. SETUP NEUTRON CLANG
+      # ============================================================
+      - name: Setup Neutron Clang toolchain
+        run: |
+          mkdir -p "$HOME/toolchains"
+
+          if ls "$HOME/toolchains"/neutron-clang-* >/dev/null 2>&1; then
+
+            echo "Neutron Clang already exists in cache."
+
+          else
+
+            cd "$HOME/toolchains"
+
+            echo "Downloading Neutron Clang..."
+
+            curl -L \
+              -o neutron-clang.tar.zst \
+              https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/03062026/neutron-clang-03062026.tar.zst
+
+            echo "Extracting Neutron Clang..."
+
+            tar -I zstd -xf neutron-clang.tar.zst
+
+            rm -f neutron-clang.tar.zst
+
+          fi
+
+          CLANG_DIR=$(find "$HOME/toolchains" \
+            -maxdepth 1 \
+            -type d \
+            -name 'neutron-clang-*' \
+            | head -n1)
+
+          if [ -z "$CLANG_DIR" ]; then
+            echo "ERROR: Neutron Clang directory not found."
+            exit 1
+          fi
+
+          echo "Neutron Clang:"
+          echo "$CLANG_DIR"
+
+          echo "PATH=$CLANG_DIR/bin:$PATH" >> "$GITHUB_ENV"
+
+          echo "CC=$CLANG_DIR/bin/clang" >> "$GITHUB_ENV"
+
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+
+          echo "LD_LIBRARY_PATH=$CLANG_DIR/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 10. ENVIRONMENT
+      # ============================================================
+      - name: Set build environment
+        run: |
+          echo "KERNEL_ROOT=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+
+          echo "ARCH=arm64" >> "$GITHUB_ENV"
+
+          echo "KBUILD_BUILD_USER=@ravindu644" >> "$GITHUB_ENV"
+
+          echo "KBUILD_BUILD_HOST=github-actions" >> "$GITHUB_ENV"
+
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+
+          echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
+
+          echo "CCACHE_COMPRESS=1" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 11. BUILD KERNEL
+      # ============================================================
+      - name: Build kernel
+        id: build
+        run: |
+
+          set -e
+
+          export KERNEL_ROOT="${GITHUB_WORKSPACE}"
+
+          export CLANG_DIR="$(
+            find "$HOME/toolchains" \
+              -maxdepth 1 \
+              -type d \
+              -name 'neutron-clang-*' \
+              | head -n1
+          )"
+
+          export PATH="${CLANG_DIR}/bin:${PATH}"
+
+          export CC="${CLANG_DIR}/bin/clang"
+
+          export CCACHE_DIR="$HOME/.cache/ccache"
+
+          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+
+          export CCACHE_MAXSIZE=5G
+
+          export CCACHE_COMPRESS=1
+
+          echo "============================================"
+          echo "        KERNEL BUILD ENVIRONMENT"
+          echo "============================================"
+
+          echo "Kernel root : ${KERNEL_ROOT}"
+          echo "Clang dir   : ${CLANG_DIR}"
+          echo "Compiler    : ${CC}"
+          echo "CPU threads : $(nproc)"
+
+          echo
+          echo "===== CPU ====="
+
+          nproc
+
+          lscpu | grep -E \
+            'Model name|CPU\(s\)|Thread|Core|MHz' \
+            || true
+
+          echo
+          echo "===== MEMORY ====="
+
+          free -h
+
+          echo
+          echo "===== CCACHE BEFORE BUILD ====="
+
+          ccache --show-stats
+
+          echo
+          echo "============================================"
+          echo "        CONFIGURING KERNEL"
+          echo "============================================"
+
+          BUILD_OPTIONS=(
+            -C "${KERNEL_ROOT}"
+            O="${KERNEL_ROOT}/out"
+
+            -j"$(nproc)"
+
+            ARCH=arm64
+
+            CROSS_COMPILE=aarch64-linux-gnu-
+
+            CLANG_TRIPLE=aarch64-linux-gnu-
+
+            CC="${CC}"
+
+            LLVM=1
+            LLVM_IAS=1
+
+            AR="$(dirname "${CC}")/llvm-ar"
+            NM="$(dirname "${CC}")/llvm-nm"
+            LD="$(dirname "${CC}")/ld.lld"
+
+            STRIP="$(dirname "${CC}")/llvm-strip"
+
+            OBJCOPY="$(dirname "${CC}")/llvm-objcopy"
+
+            OBJDUMP="$(dirname "${CC}")/llvm-objdump"
+
+            READELF="$(dirname "${CC}")/llvm-readelf"
+
+            HOSTCC="${CC}"
+
+            HOSTCXX="${CC}++"
+          )
+
+          mkdir -p \
+            "${KERNEL_ROOT}/out" \
+            "${KERNEL_ROOT}/build"
+
+          make "${BUILD_OPTIONS[@]}" \
+            spearhead2ksu_defconfig
+
+          ./scripts/config \
+            --file out/.config \
+            --enable CONFIG_KSU
+
+          make "${BUILD_OPTIONS[@]}" \
+            olddefconfig
+
+          echo
+          echo "============================================"
+          echo "        CCACHE BEFORE COMPILATION"
+          echo "============================================"
+
+          ccache --show-stats
+
+          echo
+          echo "============================================"
+          echo "        BUILDING KERNEL IMAGE"
+          echo "============================================"
+
+          time make "${BUILD_OPTIONS[@]}" \
+            Image
+
+          echo
+          echo "============================================"
+          echo "        CCACHE AFTER COMPILATION"
+          echo "============================================"
+
+          ccache --show-stats
+
+          echo
+          echo "===== CCACHE SUMMARY ====="
+
+          ccache --show-stats
+
+          if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
+
+            echo
+            echo "Kernel Image successfully built."
+
+            ls -lh \
+              "${KERNEL_ROOT}/out/arch/arm64/boot/Image"
+
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+
+          else
+
+            echo
+            echo "ERROR: Kernel Image was not generated."
+
+            echo "exit_code=1" >> "$GITHUB_OUTPUT"
+
+            exit 1
+
+          fi
+
+      # ============================================================
+      # 12. COLLECT ARTIFACTS
+      # ============================================================
+      - name: Collect artifacts
+        if: steps.build.outputs.exit_code == 0
+        run: |
+
+          mkdir -p artifacts
+
+          cp \
+            out/arch/arm64/boot/Image \
+            artifacts/
+
+          cp \
+            out/arch/arm64/boot/Image.lz4 \
+            artifacts/ \
+            || true
+
+          echo "Artifacts:"
+
+          ls -lh artifacts/
+
+      # ============================================================
+      # 13. UPLOAD ARTIFACTS
+      # ============================================================
+      - name: Upload artifacts
+        if: steps.build.outputs.exit_code == 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image-spearhead-ksu-susfs
+          path: artifacts/
+
+      # ============================================================
+      # 14. FINAL CCACHE STATISTICS
+      # ============================================================
+      - name: Show final ccache statistics
+        if: always()
+        run: |
+          echo "============================================"
+          echo "          FINAL CCACHE STATISTICS"
+          echo "============================================"
+
+          ccache --show-stats || true
+
+          echo
+          echo "============================================"
+          echo "          CCACHE CONFIGURATION"
+          echo "============================================"
+
+          ccache --show-config || true
