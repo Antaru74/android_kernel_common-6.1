@@ -17,42 +17,14 @@ jobs:
           fetch-depth: 1
           submodules: 'recursive'
 
-      # Cache untuk apt packages
-      - name: Cache apt packages
-        uses: actions/cache@v4
-        id: cache-apt
-        with:
-          path: /var/cache/apt/archives
-          key: apt-cache-${{ runner.os }}-${{ hashFiles('**/apt-packages.txt') }}
-          restore-keys: |
-            apt-cache-${{ runner.os }}-
-
-      - name: Install build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y git device-tree-compiler lz4 xz-utils zlib1g-dev \
-            openjdk-17-jdk gcc g++ python3 python-is-python3 p7zip-full \
-            android-sdk-libsparse-utils erofs-utils default-jdk gnupg \
-            flex bison gperf build-essential zip curl libc6-dev libncurses-dev \
-            libx11-dev libreadline-dev libgl1-mesa-dev sudo bc \
-            grep tofrodos python3-markdown libxml2-utils xsltproc libtinfo6 \
-            cpio kmod openssl libelf-dev pahole libssl-dev libarchive-tools \
-            zstd rsync
-          wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
-            sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb || true
-
-      # Cache untuk toolchain dengan compression
-      - name: Cache Neutron Clang toolchain
-        id: cache-toolchain
+      - name: Setup ccache cache
         uses: actions/cache@v4
         with:
-          path: |
-            ~/toolchains/neutron-clang-*
-            ~/.cache/ccache
-          key: neutron-clang-03062026-${{ runner.os }}-${{ hashFiles('**/Makefile') }}
+          path: ~/.ccache
+          # Kunci cache dibuat dinamis berdasarkan commit, dan akan menggunakan restore-keys jika tidak ada kecocokan persis
+          key: ${{ runner.os }}-kernel-ccache-${{ github.sha }}
           restore-keys: |
-            neutron-clang-03062026-${{ runner.os }}
-            neutron-clang-${{ runner.os }}
+            ${{ runner.os }}-kernel-ccache-
 
       - name: Download and apply kernel patches (skip if fails)
         run: |
@@ -92,82 +64,61 @@ jobs:
 
           echo "Patch processing completed."
 
-      - name: Setup Neutron Clang toolchain with ccache
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git device-tree-compiler lz4 xz-utils zlib1g-dev \
+            openjdk-17-jdk gcc g++ python3 python-is-python3 p7zip-full \
+            android-sdk-libsparse-utils erofs-utils default-jdk gnupg \
+            flex bison gperf build-essential zip curl libc6-dev libncurses-dev \
+            libx11-dev libreadline-dev libgl1-mesa-dev sudo bc ccache \
+            grep tofrodos python3-markdown libxml2-utils xsltproc libtinfo6 \
+            cpio kmod openssl libelf-dev pahole libssl-dev libarchive-tools \
+            zstd rsync
+          wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && \
+            sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb || true
+
+      - name: Setup Neutron Clang toolchain
         run: |
           mkdir -p $HOME/toolchains
           cd $HOME/toolchains
           curl -L -o neutron-clang.tar.zst https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/03062026/neutron-clang-03062026.tar.zst
           tar -I zstd -xf neutron-clang.tar.zst
           rm neutron-clang.tar.zst
-          
-          # Setup ccache
-          sudo apt install -y ccache
-          ccache -M 5G
-          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=true" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
-          
           CLANG_DIR=$(ls -d neutron-clang-* | head -n1)
           echo "PATH=$HOME/toolchains/$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
+          # CC akan ditimpa dengan wrapper ccache pada tahap build, tapi kita inisiasi base dir-nya
           echo "CC=$HOME/toolchains/$CLANG_DIR/bin/clang" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
 
-      - name: Setup ccache for cached toolchain
-        if: steps.cache-toolchain.outputs.cache-hit == 'true'
-        run: |
-          sudo apt install -y ccache
-          ccache -M 5G
-          echo "CCACHE_DIR=$HOME/.cache/ccache" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=true" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
-          
-          CLANG_DIR=$(ls -d $HOME/toolchains/neutron-clang-* | head -n1)
-          echo "PATH=$CLANG_DIR/bin:$PATH" >> $GITHUB_ENV
-          echo "CC=$CLANG_DIR/bin/clang" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
-
-      - name: Set environment variables
+      - name: Set environment variables and configure ccache
         run: |
           echo "KERNEL_ROOT=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "KBUILD_BUILD_USER=@ravindu644" >> $GITHUB_ENV
-          echo "USE_CCACHE=1" >> $GITHUB_ENV
-          echo "CCACHE_SLOPPINESS=file_macro,time_macros,include_file_mtime" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=${HOME}/toolchains/neutron-clang-*/lib:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          
+          # Konfigurasi CCACHE
+          echo "CCACHE_DIR=${HOME}/.ccache" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          echo "CCACHE_COMPILERCHECK=content" >> $GITHUB_ENV
+          export CCACHE_DIR="${HOME}/.ccache"
+          ccache -M 5G
+          ccache -z # Reset statistik ccache untuk melihat hit rate build kali ini
 
-      # Cache untuk kernel build outputs dengan ccache
-      - name: Cache kernel build
-        uses: actions/cache@v4
-        with:
-          path: |
-            out/
-            build/
-            ~/.cache/ccache
-          key: kernel-build-${{ github.sha }}-${{ github.run_id }}
-          restore-keys: |
-            kernel-build-${{ github.sha }}-
-            kernel-build-
-
-      - name: Build kernel with optimizations
+      - name: Build kernel
         id: build
         run: |
           export KERNEL_ROOT="${GITHUB_WORKSPACE}"
+          # Sedikit perbaikan agar path tidak dobel. ls -d sudah mengembalikan path absolut
           export CLANG_DIR="$(ls -d ${HOME}/toolchains/neutron-clang-* | head -n1)"
           export PATH="${CLANG_DIR}/bin:${PATH}"
-          export CC="${CLANG_DIR}/bin/clang"
           
-          # Gunakan ccache
+          # Membungkus clang dengan ccache
           export CC="ccache ${CLANG_DIR}/bin/clang"
-          export CXX="ccache ${CLANG_DIR}/bin/clang++"
-          
-          # Optimasi build flags
-          export KCFLAGS="-O2 -pipe -fomit-frame-pointer -march=armv8-a+crc+crypto+fp16+rcpc+dotprod+sha3+fp16fml+rdm+lse+fp16+sha2+fp16fml+fp16 -mtune=neoverse-n1"
-          export CFLAGS="-O2 -pipe"
-          export CXXFLAGS="-O2 -pipe"
+          export HOSTCC="ccache ${CLANG_DIR}/bin/clang"
+          export HOSTCXX="ccache ${CLANG_DIR}/bin/clang++"
 
           BUILD_OPTIONS=(
             -C "${KERNEL_ROOT}"
@@ -179,44 +130,34 @@ jobs:
             CC="${CC}"
             LLVM=1
             LLVM_IAS=1
-            AR="$(dirname ${CLANG_DIR}/bin/clang)/llvm-ar"
-            NM="$(dirname ${CLANG_DIR}/bin/clang)/llvm-nm"
-            LD="$(dirname ${CLANG_DIR}/bin/clang)/ld.lld"
-            STRIP="$(dirname ${CLANG_DIR}/bin/clang)/llvm-strip"
-            OBJCOPY="$(dirname ${CLANG_DIR}/bin/clang)/llvm-objcopy"
-            OBJDUMP="$(dirname ${CLANG_DIR}/bin/clang)/llvm-objdump"
-            READELF="$(dirname ${CLANG_DIR}/bin/clang)/llvm-readelf"
-            HOSTCC="${CLANG_DIR}/bin/clang"
-            HOSTCXX="${CLANG_DIR}/bin/clang++"
-            KCFLAGS="${KCFLAGS}"
-            CFLAGS="${CFLAGS}"
-            CXXFLAGS="${CXXFLAGS}"
+            # Base tools dari clang tanpa ccache (karena ccache hanya untuk compiler)
+            AR="${CLANG_DIR}/bin/llvm-ar"
+            NM="${CLANG_DIR}/bin/llvm-nm"
+            LD="${CLANG_DIR}/bin/ld.lld"
+            STRIP="${CLANG_DIR}/bin/llvm-strip"
+            OBJCOPY="${CLANG_DIR}/bin/llvm-objcopy"
+            OBJDUMP="${CLANG_DIR}/bin/llvm-objdump"
+            READELF="${CLANG_DIR}/bin/llvm-readelf"
+            HOSTCC="${HOSTCC}"
+            HOSTCXX="${HOSTCXX}"
           )
 
           mkdir -p "${KERNEL_ROOT}/out" "${KERNEL_ROOT}/build"
 
-          # Optimasi: skip defconfig jika sudah ada
-          if [ ! -f "${KERNEL_ROOT}/out/.config" ]; then
-            echo "Running defconfig..."
-            make "${BUILD_OPTIONS[@]}" spearhead2_defconfig
-          else
-            echo "Using existing .config file"
-          fi
+          make "${BUILD_OPTIONS[@]}" spearhead2_defconfig
+          make "${BUILD_OPTIONS[@]}" Image
 
-          # Build hanya kernel dan modules yang diperlukan
-          echo "Building kernel image..."
-          time make "${BUILD_OPTIONS[@]}" Image
+          # Menampilkan statistik ccache setelah build selesai
+          echo "=== CCACHE STATS ==="
+          ccache -s
+          echo "===================="
 
           if [ -f "${KERNEL_ROOT}/out/arch/arm64/boot/Image" ]; then
             echo "exit_code=0" >> $GITHUB_OUTPUT
-            echo "Build successful!"
           else
             echo "exit_code=1" >> $GITHUB_OUTPUT
             exit 1
           fi
-          
-          # Tampilkan statistik ccache
-          ccache -s
 
       - name: Collect artifacts (kernel image only)
         if: steps.build.outputs.exit_code == 0
@@ -224,15 +165,10 @@ jobs:
           mkdir -p artifacts
           cp out/arch/arm64/boot/Image artifacts/ || true
           cp out/arch/arm64/boot/Image.lz4 artifacts/ || true
-          
-          # Tambahan: compress artifact untuk upload lebih cepat
-          cd artifacts
-          tar -czf kernel-image-spearhead.tar.gz Image Image.lz4 2>/dev/null || true
 
       - name: Upload artifacts
         if: steps.build.outputs.exit_code == 0
         uses: actions/upload-artifact@v4
         with:
           name: kernel-image-spearhead
-          path: artifacts/*
-          compression-level: 6
+          path: artifacts
